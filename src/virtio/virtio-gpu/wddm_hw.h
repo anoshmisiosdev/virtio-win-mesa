@@ -196,6 +196,12 @@ typedef struct _VIOGPU_RES_INFO_REQ
      * window) and maps BAR+offset into the calling process here.  The
      * UMD uses this VA instead of D3DKMTLock when nonzero; 0 on WDDM 1.3. */
     ULONGLONG UserVa;
+
+    /* WDDM2 in: the creator's allocation lookup cookie (see
+     * VIOGPU_CREATE_ALLOCATION_EXCHANGE_EX).  Handle-based resolution is
+     * unreliable under WDDM2; nonzero => the KMD resolves through its
+     * cookie map first. */
+    ULONGLONG LookupCookie;
 } VIOGPU_RES_INFO_REQ;
 #pragma pack()
 

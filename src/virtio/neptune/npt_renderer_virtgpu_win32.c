@@ -502,7 +502,12 @@ virtgpu_resource_create_blob(struct npt_virtgpu *gpu, uint32_t blob_mem,
    VIOGPU_ESCAPE res_info = {
       .Type = VIOGPU_RES_INFO,
       .DataLength = sizeof(res_info.ResourceInfo),
-      .ResourceInfo = { .ResHandle = *out_alloc },
+      .ResourceInfo = {
+         .ResHandle = *out_alloc,
+         /* Authoritative identity: handle resolution raced handle reuse
+          * and once bound this blob to another allocation's res_id. */
+         .LookupCookie = alloc_priv.LookupCookie,
+      },
    };
    status = virtgpu_escape(gpu, &res_info);
    if (!NT_SUCCESS(status)) {
