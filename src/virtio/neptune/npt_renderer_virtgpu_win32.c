@@ -364,7 +364,7 @@ virtgpu_send_cmd_locked(struct npt_virtgpu *gpu, UINT type, UINT flags,
  * - WDDM 1.3: keep the allocation-list wire.  BY_ID is NOT equivalent
  *   there: the allocation reference is what makes VidMm commit the blob's
  *   backing before the DMA executes, and switching 1.3 to BY_ID blacked
- *   the desktop (scanout armed, frames black -- A/B'd 2026-07-17). */
+ *   the desktop: scanout armed, every frame black. */
 static NTSTATUS
 virtgpu_map_blob_op(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc,
                     uint32_t res_id, UINT type)
@@ -509,18 +509,32 @@ virtgpu_resource_create_blob(struct npt_virtgpu *gpu, uint32_t blob_mem,
          .LookupCookie = alloc_priv.LookupCookie,
       },
    };
-   status = virtgpu_escape(gpu, &res_info);
-   if (!NT_SUCCESS(status)) {
-      npt_log("virtgpu: RES_INFO escape failed 0x%lx", status);
-      goto fail_destroy;
+   /* The KMD issues RESOURCE_CREATE_BLOB from the in-create open, but the
+    * virtio ctrl queue is asynchronous and virtgpu_drain only flushes the
+    * D3DKMT scheduler -- immediately after CreateAllocation the blob can
+    * legitimately still be pending.  Retry briefly instead of failing the
+    * whole device create, which otherwise fails nondeterministically
+    * with "failed to create ring". */
+   for (int attempt = 0;; attempt++) {
+      status = virtgpu_escape(gpu, &res_info);
+      if (!NT_SUCCESS(status)) {
+         npt_log("virtgpu: RES_INFO escape failed 0x%lx", status);
+         goto fail_destroy;
+      }
+      if (res_info.ResourceInfo.IsBlob && res_info.ResourceInfo.IsCreated)
+         break;
+      if (attempt >= 100) {
+         npt_log("virtgpu: RES_INFO reports blob not created (gave up after %d tries)",
+                 attempt + 1);
+         status = STATUS_INVALID_PARAMETER;
+         goto fail_destroy;
+      }
+      if (attempt == 0)
+         npt_log("virtgpu: RES_INFO blob not created yet -- retrying");
+      Sleep(1);
    }
    if (out_user_va)
       *out_user_va = (void *)(uintptr_t)res_info.ResourceInfo.UserVa;
-   if (!res_info.ResourceInfo.IsBlob || !res_info.ResourceInfo.IsCreated) {
-      npt_log("virtgpu: RES_INFO reports blob not created");
-      status = STATUS_INVALID_PARAMETER;
-      goto fail_destroy;
-   }
    *out_res_id = res_info.ResourceInfo.Id;
 
    if (is_mappable) {
