@@ -389,6 +389,23 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
 } VIOGPU_CREATE_ALLOCATION_EXCHANGE;
 #pragma pack()
 
+// Allocation private data extended with a lookup cookie (lockstep with
+// viogpum.h).  dxgkrnl replays the create-time bytes at every open; a
+// unique cookie makes open->allocation pairing authoritative instead of
+// relying on the KMD's per-thread create/open FIFO, which mispairs when
+// one thread interleaves two creates before their opens (two D3D11
+// devices in one process handed each other's transport ring blobs).
+// Presence is signaled by size.  Cookie namespaces: bit63 = KMD standard
+// allocations, bit62 = KMD-derived shared-texture keys, otherwise
+// UMD-minted (pid<<32 | counter).
+#pragma pack(1)
+typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE_EX
+{
+    VIOGPU_CREATE_ALLOCATION_EXCHANGE Base;
+    ULONGLONG LookupCookie; // nonzero => recorded in the adapter cookie map
+} VIOGPU_CREATE_ALLOCATION_EXCHANGE_EX;
+#pragma pack()
+
 // ================= BLIT
 
 #pragma pack(1)
