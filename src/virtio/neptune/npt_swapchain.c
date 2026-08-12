@@ -834,8 +834,18 @@ gsc_aux_destroy(void *aux)
    struct npt_guest_swapchain *s = aux;
    struct npt_guest_swapchain_common *c = &s->base;
    struct npt_device *dev = c->com ? c->com->base.device : NULL;
+   const bool shutting_down = dev && npt_device_is_shutting_down(dev);
 
-   gsc_teardown_wsi(s, false);
+   gsc_teardown_wsi(s, shutting_down);
+
+   if (shutting_down) {
+      /* Device teardown frees wrappers via its own drain; leak the aux
+       * bookkeeping rather than touch freed wrappers (the skipped-join
+       * workers may also still run with a pointer to this aux).  A
+       * CDS_FULLSCREEN display mode is restored by the OS at process
+       * exit, so the modeset needs no undo here. */
+      return;
+   }
 
    /* A swap chain destroyed while still fullscreen leaves the display in the
     * app's mode; restore the desktop mode like DXGI does on teardown. */
