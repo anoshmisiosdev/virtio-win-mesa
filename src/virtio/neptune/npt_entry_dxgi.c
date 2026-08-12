@@ -50,9 +50,12 @@ CreateDXGIFactory(REFIID riid, void **ppFactory)
 
    void *raw = NULL;
    HRESULT hr = npt_call_CreateDXGIFactory(dev->ring, riid, &raw);
-   /* Wrap as base IDXGIFactory regardless of riid; QI handles tiers. */
-   return finish_create_dxgi_factory(dev, &NPT_IID_IDXGIFactory, raw, hr,
-                                     ppFactory);
+   /* Wrap with the CALLER's riid: the returned pointer is used as that
+    * interface directly (e.g. CreateDXGIFactory1(IID_IDXGIFactory2) +
+    * CreateSwapChainForHwnd), so a lower-tier vtbl would send calls
+    * through slots past the end of the storage. */
+   return finish_create_dxgi_factory(dev, riid ? riid : &NPT_IID_IDXGIFactory,
+                                     raw, hr, ppFactory);
 }
 
 HRESULT NPT_API
@@ -67,8 +70,10 @@ CreateDXGIFactory1(REFIID riid, void **ppFactory)
 
    void *raw = NULL;
    HRESULT hr = npt_call_CreateDXGIFactory1(dev->ring, riid, &raw);
-   return finish_create_dxgi_factory(dev, &NPT_IID_IDXGIFactory1, raw, hr,
-                                     ppFactory);
+   /* Caller's riid; see CreateDXGIFactory. */
+   return finish_create_dxgi_factory(dev,
+                                     riid ? riid : &NPT_IID_IDXGIFactory1,
+                                     raw, hr, ppFactory);
 }
 
 HRESULT NPT_API
@@ -83,6 +88,7 @@ CreateDXGIFactory2(UINT flags, REFIID riid, void **ppFactory)
 
    void *raw = NULL;
    HRESULT hr = npt_call_CreateDXGIFactory2(dev->ring, flags, riid, &raw);
-   return finish_create_dxgi_factory(dev, &NPT_IID_IDXGIFactory2, raw, hr,
-                                     ppFactory);
+   return finish_create_dxgi_factory(dev,
+                                     riid ? riid : &NPT_IID_IDXGIFactory2,
+                                     raw, hr, ppFactory);
 }

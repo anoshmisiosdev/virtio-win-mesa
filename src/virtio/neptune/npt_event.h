@@ -30,7 +30,10 @@ void npt_event_fini(struct npt_device *dev);
 /* Call BEFORE the generated thunk so the host's _replace sees the
  * proxy eventfd.  Internally refcounted: the matching RELEASE is
  * driven by the waiter thread when the last in-flight arm completes. */
-bool npt_event_arm(struct npt_device *dev, void *hEvent);
+/* Arms a single-use host proxy for one wait on hEvent; returns the
+ * minted token (nonzero) to embed in the wire call's HANDLE slot, or 0
+ * on failure.  The waiter releases the token after completion. */
+uint64_t npt_event_arm(struct npt_device *dev, void *hEvent);
 
 /* Single-use token arm returning the caller-owned sync_file fd (-1 on
  * failure).  Pair a successful arm with npt_event_release_token after
@@ -38,5 +41,11 @@ bool npt_event_arm(struct npt_device *dev, void *hEvent);
  * process-unique and never reused (host proxies are one-shot). */
 int npt_event_arm_token_fd(struct npt_device *dev, uint64_t token);
 void npt_event_release_token(struct npt_device *dev, uint64_t token);
+
+/* Monitored-fence gate arm (see npt_event.c): arms a GATE_WAIT on the
+ * drain fence reaching `value` and the matching KMD event-ring fence.
+ * Returns the KMD gate token (0 on failure). */
+uint64_t npt_event_gate_arm(struct npt_device *dev, uint64_t fence_obj_id,
+                            uint64_t value);
 
 #endif /* NPT_EVENT_H */
