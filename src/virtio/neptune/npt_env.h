@@ -54,6 +54,18 @@ enum npt_debug {
     * all D3D12 traffic serializes on the primary ring. */
    NPT_DEBUG_D3D12_SINGLE_RING       = 1ull << 5,
 
+   /* Force the legacy Render submission path even when the KMD is in
+    * WDDM2 (GpuMmu) mode. */
+   NPT_DEBUG_NO_WDDM2_SUBMIT         = 1ull << 6,
+
+   /* Cap the D3D11 DDI advertisement at D3D11.1 regardless of KMD mode. */
+   NPT_DEBUG_NO_WDDM2_DDI            = 1ull << 7,
+
+   /* Cap the D3D11 DDI advertisement at D3DWDDM2_0 (drop 2_1/2_2).
+    * Triage lever: separates "new-tier DDI table bug" from "cap bug"
+    * without a rebuild. */
+   NPT_DEBUG_WDDM2_0_ONLY            = 1ull << 8,
+
    /* Report D3D12 command lists whose recording migrates between threads.
     * Under NPT_PERF=multi_ring that splits one list's recording across
     * TLS rings, so the host decodes it out of order. */

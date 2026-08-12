@@ -29,6 +29,9 @@ static const struct debug_control npt_debug_options[] = {
    { "present_order",            NPT_DEBUG_PRESENT_ORDER },
    { "expose_all_modes",         NPT_DEBUG_EXPOSE_ALL_MODES },
    { "d3d12_single_ring",        NPT_DEBUG_D3D12_SINGLE_RING },
+   { "no_wddm2_submit",          NPT_DEBUG_NO_WDDM2_SUBMIT },
+   { "no_wddm2_ddi",             NPT_DEBUG_NO_WDDM2_DDI },
+   { "wddm2_0_only",             NPT_DEBUG_WDDM2_0_ONLY },
    { "d3d12_list_migration",     NPT_DEBUG_D3D12_LIST_MIGRATION },
    { NULL, 0 },
 };
