@@ -25,6 +25,8 @@
 #define NPT_SERIALIZE_ERROR_CAPACITY   (4u * 1024u)
 #define NPT_E_NOT_SUFFICIENT_BUFFER    ((HRESULT)0x8007007AL)
 
+bool npt_d3d12_from_ddi = false;
+
 /* Shared factory: the standalone d3d12.dll export and Triton's
  * OpenAdapter12 DDI (tritonDDI12.c) both create the inner Neptune
  * device through here — same pattern as npt_d3d11_create_device_internal.
@@ -43,11 +45,23 @@ npt_d3d12_create_device_internal(IUnknown *pAdapter,
 {
    npt_com_init();
 
-   /* D3D12's command-list and queue model is built for multi-threaded
-    * recording, so multi-ring is the default.
-    * NPT_DEBUG=d3d12_single_ring forces the primary ring instead. */
+   /* Multi-ring is the default for the API path only; DDI devices
+    * serialize on the primary ring.
+    *
+    * The Windows D3D12 runtime services every cross-queue dependency
+    * through dxgkrnl monitored-fence packets on the queues' kernel
+    * contexts and never calls pfnSignalFence/pfnWaitForFence, so no
+    * wire-level queue wait exists that could order independent per-queue
+    * rings at the host's ingress -- kernel wait packets hold context DMA
+    * only, never ring traffic.  A single ring preserves the app's
+    * submission order end to end, which is the ordering contract those
+    * kernel packets assume.
+    *
+    * NPT_PERF=multi_ring opts the DDI path in explicitly;
+    * NPT_DEBUG=d3d12_single_ring forces single-ring everywhere. */
    npt_env_init();
-   if (!NPT_DEBUG(D3D12_SINGLE_RING)) {
+   const bool multi_ring_default = !npt_d3d12_from_ddi;
+   if (!NPT_DEBUG(D3D12_SINGLE_RING) && multi_ring_default) {
       npt_env_force_perf(NPT_PERF_MULTI_RING);
    }
 
@@ -65,7 +79,8 @@ npt_d3d12_create_device_internal(IUnknown *pAdapter,
       return NPT_DXGI_ERROR_UNSUPPORTED;
    }
 
-   if (!dev->multi_ring_enabled && !NPT_DEBUG(D3D12_SINGLE_RING)) {
+   if (!dev->multi_ring_enabled && !NPT_DEBUG(D3D12_SINGLE_RING) &&
+       (multi_ring_default || NPT_PERF(MULTI_RING))) {
       /* The device singleton latched multi_ring off before this call --
        * the usual cause is the app creating its DXGI factory, which
        * acquires the device, before D3D12CreateDevice runs.  Upgrading
