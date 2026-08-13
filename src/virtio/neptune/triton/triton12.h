@@ -33,6 +33,12 @@ typedef struct TRITON12_ADAPTER
     D3D12DDI_HRTTABLE       hRTTableCmdList[2];
 } TRITON12_ADAPTER, *PTRITON12_ADAPTER;
 
+/* Command queues per device tracked for cross-queue ordering.  Time Spy uses
+ * four (three DIRECT + one COMPUTE); the cap only bounds the registry walk,
+ * and overflow degrades to "not ordered against the extras", never to
+ * incorrect behaviour. */
+#define TRITON12_MAX_QUEUES 16
+
 typedef struct TRITON12_DEVICE
 {
     PTRITON12_ADAPTER            pAdapter;
@@ -50,6 +56,23 @@ typedef struct TRITON12_DEVICE
      * KMD can bind exported blobs; see
      * tritonPresentEnsureRuntimeCtx. */
     BOOL                         RuntimeCtxInited;
+
+    /* ---- cross-queue submission ordering (see t12OrderAgainstSiblings) ----
+     *
+     * Registry of this device's command queues.  Needed because the app's
+     * cross-queue GPU waits never reach the host: the D3D12 runtime services
+     * fences through dxgkrnl monitored-fence packets and never calls
+     * pfnWaitForFence, while t12ExecuteCommandLists forwards the real work to
+     * the host over the ring in user mode.  dxgkrnl parks only the kernel
+     * packets, so the host sees two independent Vulkan queues with no
+     * ordering at all.
+     *
+     * Guarded by QueueLock, which is only ever taken around the (tiny)
+     * registry walk -- never while calling into the inner device. */
+    CRITICAL_SECTION             QueueLock;
+    BOOL                         QueueLockInit;
+    struct TRITON12_QUEUE       *Queues[TRITON12_MAX_QUEUES];
+    UINT                         QueueCount;
 } TRITON12_DEVICE, *PTRITON12_DEVICE;
 
 static inline PTRITON12_DEVICE
@@ -132,6 +155,13 @@ typedef struct TRITON12_QUEUE
      * single-use proxy token, so reusing the handle is safe, and a
      * per-present CreateEvent would churn a handle on every frame. */
     HANDLE                       hPresentArmEvent;
+    /* Slot in pDev->Queues, and the highest drain value this queue has already
+     * ordered itself behind for each sibling slot.  Keeping the high-water
+     * mark stops us re-emitting a Wait for work we are already ordered after,
+     * which would otherwise add one wait per sibling per ECL for the whole
+     * run. */
+    UINT                         Slot;
+    UINT64                       XQueueSeen[TRITON12_MAX_QUEUES];
 } TRITON12_QUEUE, *PTRITON12_QUEUE;
 
 typedef struct TRITON12_ALLOCATOR

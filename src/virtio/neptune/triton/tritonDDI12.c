@@ -71,6 +71,12 @@ triton12CreateDevice(D3D12DDI_HADAPTER hAdapter,
     p->pDev = dev;
     TR_LOG("12.CreateDevice: inner Neptune ID3D12Device up (%p)", (void *)dev);
 
+    /* Queue registry lock, for cross-queue submission ordering.  Initialised
+     * here rather than lazily on first queue create: CreateCommandQueue is
+     * free-threaded, so a lazy init would race two queues into two locks. */
+    InitializeCriticalSection(&p->QueueLock);
+    p->QueueLockInit = TRUE;
+
     /* Device-funcs tables are not filled here: the runtime requests each
      * one separately through pfnFillDDITable. */
     return S_OK;
@@ -86,6 +92,11 @@ triton12DestroyDevice(D3D12DDI_HDEVICE hDevice)
     if (p->pDev) {
         ID3D12Device_Release(p->pDev);
         p->pDev = NULL;
+    }
+    if (p->QueueLockInit) {
+        p->QueueLockInit = FALSE;
+        p->QueueCount = 0;
+        DeleteCriticalSection(&p->QueueLock);
     }
     p->pAdapter = NULL;
 }

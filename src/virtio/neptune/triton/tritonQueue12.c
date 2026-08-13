@@ -11,6 +11,8 @@
 #include "triton12.h"
 #include "triton_log.h"
 
+#include <stdlib.h>   /* getenv, for the TRITON12_NO_XQUEUE_ORDER A/B switch */
+
 #include "virtio/virtio-gpu/wddm_hw.h"   /* VIOGPU_CMD_GATE / VIOGPU_DMA_PRIVATE */
 
 /* Arm a GPU-true gate on the queue's drain fence reaching `value`;
@@ -109,6 +111,23 @@ t12CreateCommandQueue(D3D12DDI_HDEVICE hDevice,
         TR_LOG("12.CreateCommandQueue: present-arm event create FAILED %lu "
                "(flips not render-gated on this queue)",
                (unsigned long)GetLastError());
+
+    /* Join the device's queue registry so later ECLs on OTHER queues can order
+     * themselves behind this one (t12OrderAgainstSiblings).  Not fatal if the
+     * registry is full: the queue simply is not ordered against, which is
+     * today's behaviour. */
+    q->Slot = TRITON12_MAX_QUEUES;
+    if (!p->QueueLockInit)
+        return S_OK;   /* device create failed to init the lock; stay unordered */
+    EnterCriticalSection(&p->QueueLock);
+    if (p->QueueCount < TRITON12_MAX_QUEUES) {
+        q->Slot = p->QueueCount;
+        p->Queues[p->QueueCount++] = (struct TRITON12_QUEUE *)q;
+    }
+    LeaveCriticalSection(&p->QueueLock);
+    if (q->Slot >= TRITON12_MAX_QUEUES)
+        TR_LOG("12.CreateCommandQueue: queue registry full (%u); this queue is "
+               "NOT cross-queue ordered", TRITON12_MAX_QUEUES);
     return S_OK;
 }
 
@@ -119,6 +138,35 @@ t12DestroyCommandQueue(D3D12DDI_HDEVICE hDevice, D3D12DDI_HCOMMANDQUEUE hQueue)
     PTRITON12_QUEUE q = (PTRITON12_QUEUE)hQueue.pDrvPrivate;
     if (!q)
         return;
+
+    /* Leave the registry before anything is released: a concurrent ECL on a
+     * sibling walks Queues[] and touches pDrainFence.  Compact by moving the
+     * tail entry down and fixing its Slot, so slots stay dense and every
+     * queue's XQueueSeen[] indices remain valid. */
+    if (p && p->QueueLockInit) {
+        EnterCriticalSection(&p->QueueLock);
+        for (UINT i = 0; i < p->QueueCount; i++) {
+            if (p->Queues[i] != (struct TRITON12_QUEUE *)q)
+                continue;
+            PTRITON12_QUEUE moved = (PTRITON12_QUEUE)p->Queues[p->QueueCount - 1];
+            p->Queues[i] = (struct TRITON12_QUEUE *)moved;
+            p->Queues[--p->QueueCount] = NULL;
+            if (moved && moved != q) {
+                moved->Slot = i;
+                /* The slot now means a different queue, so every sibling's
+                 * high-water mark for it is meaningless -- clear them or a
+                 * stale mark would suppress real waits. */
+                for (UINT j = 0; j < p->QueueCount; j++) {
+                    PTRITON12_QUEUE s = (PTRITON12_QUEUE)p->Queues[j];
+                    if (s)
+                        s->XQueueSeen[i] = 0;
+                }
+            }
+            break;
+        }
+        LeaveCriticalSection(&p->QueueLock);
+    }
+
     if (q->hKMContext && p && p->pUMCallbacks &&
         p->pUMCallbacks->pfnDestroyContextCb) {
         D3DDDICB_DESTROYCONTEXT dc;
@@ -233,6 +281,117 @@ t12QueueGate(PTRITON12_QUEUE q)
     }
 }
 
+/*
+ * Cross-queue submission ordering.
+ *
+ * THE PROBLEM.  An app's `ID3D12CommandQueue::Wait(fence, v)` never reaches
+ * this driver: the runtime services D3D12 fences through dxgkrnl
+ * monitored-fence packets and never calls pfnWaitForFence (established
+ * 2026-07-30; the stub above exists only in case it ever does).  On real
+ * hardware that is fine, because the GPU work itself travels in kernel DMA
+ * packets and dxgkrnl's scheduler holds them until the wait clears.  Here it
+ * does not: t12ExecuteCommandLists forwards the batch to the host over the
+ * ring in *user mode*, immediately.  dxgkrnl parks only the kernel packets --
+ * the gate DMA -- so the host is left running the app's DIRECT and COMPUTE
+ * queues on two independent Vulkan queues with no ordering whatsoever.
+ *
+ * Measured on Time Spy: a control run spends 23-25% of GPU time on the async
+ * compute engine, and the resulting read-before-write shows up as the GT1
+ * blue-band corruption (a full-screen pass sampled while its producer was
+ * still writing).  Two independent levers that remove the concurrency --
+ * VKD3D_CONFIG=single_queue on the host, and 3DMark's own
+ * disable_async_compute in the app -- each removed the artifact
+ * (p=0.020 and p=0.027; Fisher combined p~0.005).  See
+ * shared/source/HANDOFF-2026-08-12-ts-gt1-corruption.md §2a.
+ *
+ * WHAT THIS DOES.  Before forwarding a batch on queue Q, make Q's inner host
+ * queue Wait on every sibling queue's drain fence at that sibling's current
+ * value.  The drain fences already exist and are already signalled once per
+ * ECL batch by t12QueueGate, so this costs no new objects: it just turns
+ * "submitted earlier on another queue" into a real GPU-side ordering edge on
+ * the host timeline.
+ *
+ * WHAT THIS DOES NOT DO -- read before trusting it.  This enforces
+ * *submission* order, not the app's actual waits, because the app's waits are
+ * not observable here.  It is therefore correct only when the producer's
+ * ExecuteCommandLists precedes the consumer's, which is the ordinary pattern
+ * and the one Time Spy uses.  An app that submits the consumer first and
+ * relies on a later Wait would still race.  The real fix is to route
+ * execution ordering through the kernel the way the gate already routes
+ * completion -- a DMA packet whose KMD handler releases a host-side start
+ * fence, so host execution order follows dxgkrnl's scheduling order and every
+ * cross-queue *and* cross-process wait becomes real.  That is the
+ * "HOLD/RELEASE riding the gate DMA" design in
+ * HANDOFF-2026-07-30-gpu-true-fences.md.  This is the cheap, guest-only
+ * approximation of it.
+ *
+ * It also serialises async compute against graphics, which costs the overlap:
+ * expect the same ~2-4% Time Spy graphics-score drop that single_queue shows.
+ * Set TRITON12_NO_XQUEUE_ORDER=1 in the workload's environment to turn it off
+ * for an A/B.
+ */
+static BOOL
+t12XQueueOrderEnabled(void)
+{
+    static LONG s_state; /* 0 = unknown, 1 = on, 2 = off */
+    LONG v = s_state;
+    if (v == 0) {
+        const char *e = getenv("TRITON12_NO_XQUEUE_ORDER");
+        v = (e && *e && *e != '0') ? 2 : 1;
+        InterlockedExchange(&s_state, v);
+        TR_LOG("12.XQueueOrder: cross-queue submission ordering %s",
+               v == 1 ? "ENABLED" : "DISABLED (TRITON12_NO_XQUEUE_ORDER)");
+    }
+    return v == 1;
+}
+
+static void
+t12OrderAgainstSiblings(PTRITON12_QUEUE q)
+{
+    PTRITON12_DEVICE p = q->pDev;
+    if (!p || !p->QueueLockInit || !t12XQueueOrderEnabled())
+        return;
+
+    /* Snapshot under the lock, then issue the waits outside it:
+     * ID3D12CommandQueue_Wait goes to the host over the wire, and holding a
+     * lock across that would serialise every queue in the process on it. */
+    ID3D12Fence *fences[TRITON12_MAX_QUEUES];
+    UINT64 values[TRITON12_MAX_QUEUES];
+    UINT slots[TRITON12_MAX_QUEUES];
+    UINT n = 0;
+
+    EnterCriticalSection(&p->QueueLock);
+    for (UINT i = 0; i < p->QueueCount; i++) {
+        PTRITON12_QUEUE s = (PTRITON12_QUEUE)p->Queues[i];
+        if (!s || s == q || !s->pDrainFence)
+            continue;
+        /* Aligned 64-bit read on x64 is atomic; a stale (lower) value only
+         * means a weaker edge this time, never a wrong one.  DrainValue is
+         * incremented immediately before its Signal is issued, with no
+         * blocking call in between, so waiting on it cannot deadlock. */
+        const UINT64 v = s->DrainValue;
+        if (v == 0 || s->Slot >= TRITON12_MAX_QUEUES ||
+            v <= q->XQueueSeen[s->Slot])
+            continue;
+        q->XQueueSeen[s->Slot] = v;
+        fences[n] = s->pDrainFence;
+        values[n] = v;
+        slots[n]  = s->Slot;
+        n++;
+    }
+    LeaveCriticalSection(&p->QueueLock);
+
+    for (UINT i = 0; i < n; i++) {
+        HRESULT hr = ID3D12CommandQueue_Wait(q->pQueue, fences[i], values[i]);
+        static LONG s_n;
+        LONG ln = InterlockedIncrement(&s_n);
+        if (ln <= 8 || (ln & 1023) == 0)
+            TR_LOG("12.XQueueOrder #%ld: queue %u waits on queue %u drain "
+                   "v=%llu -> 0x%08lx", (long)ln, q->Slot, slots[i],
+                   (unsigned long long)values[i], (unsigned long)hr);
+    }
+}
+
 static VOID APIENTRY
 t12ExecuteCommandLists(D3D12DDI_HCOMMANDQUEUE hQueue, UINT Count,
                        const D3D12DDI_HCOMMANDLIST *pCommandLists)
@@ -240,6 +399,10 @@ t12ExecuteCommandLists(D3D12DDI_HCOMMANDQUEUE hQueue, UINT Count,
     PTRITON12_QUEUE q = (PTRITON12_QUEUE)hQueue.pDrvPrivate;
     if (!q || !q->pQueue || !Count || !pCommandLists)
         return;
+
+    /* Before the batch reaches the host, not after: the wait has to be on the
+     * host queue's timeline ahead of this batch's work. */
+    t12OrderAgainstSiblings(q);
 
     ID3D12CommandList *stackLists[8];
     ID3D12CommandList **lists = stackLists;
