@@ -101,6 +101,14 @@ t12CreateCommandQueue(D3D12DDI_HDEVICE hDevice,
         return hr;
     }
     q->DrainValue = 0;
+    /* Event for the present-fence arm in t12Present.  Not fatal if it fails:
+     * the arm is simply skipped and flips fall back to today's ungated
+     * behaviour rather than the queue failing to create. */
+    q->hPresentArmEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!q->hPresentArmEvent)
+        TR_LOG("12.CreateCommandQueue: present-arm event create FAILED %lu "
+               "(flips not render-gated on this queue)",
+               (unsigned long)GetLastError());
     return S_OK;
 }
 
@@ -126,6 +134,10 @@ t12DestroyCommandQueue(D3D12DDI_HDEVICE hDevice, D3D12DDI_HCOMMANDQUEUE hQueue)
     if (q->pQueue) {
         ID3D12CommandQueue_Release(q->pQueue);
         q->pQueue = NULL;
+    }
+    if (q->hPresentArmEvent) {
+        CloseHandle(q->hPresentArmEvent);
+        q->hPresentArmEvent = NULL;
     }
 }
 

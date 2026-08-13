@@ -206,6 +206,58 @@ t12Present(D3D12DDI_HCOMMANDLIST hList, D3D12DDI_HCOMMANDQUEUE hQueue,
 
     static LONG s_presentN;
     LONG n = InterlockedIncrement(&s_presentN);
+
+    /* Arm the render->flip token for this frame, then wait for it.
+     *
+     * ARM.  Without this the KMD's TakeThreadToken() finds no stamp for the
+     * flip that follows, gates it on token 0 -- which always reads retired --
+     * and promotes the scanout immediately.  The D3D11 path has always armed
+     * here (tritonPresentFlushAndGate in tritonDxgi.c, "so the KMD never
+     * scans out a half-written backbuffer"); D3D12 never did, so every D3D12
+     * title presented un-gated.
+     *
+     * Pairing is per-thread: the runtime calls pfnPresentCb on THIS thread
+     * as soon as this DDI returns and DxgkDdiPresent runs synchronously in
+     * it, so the arm issued here is the stamp that flip consumes (see the
+     * token block in viogpu_adapter.h).
+     *
+     * WAIT.  Arming alone is not enough, because these titles are
+     * DWM-composited rather than direct-scanout: measured over a full Time
+     * Spy run, all 2937 SET_SCANOUT_BLOB events carry the desktop primary and
+     * never the workload's own surface.  The consumer of this backbuffer is
+     * therefore dwm.exe sampling it as a shared texture from another process,
+     * and the frame-ready signal it acts on is pfnPresentCb itself -- no
+     * scanout-side gate can order that handoff, which is why gating the flip
+     * alone changed nothing even though the gate measurably held flips for a
+     * full frame (284-300 ms).  The producer must not report the frame until
+     * the GPU has actually finished it, which is what the D3D11 path already
+     * does for this case (arm=TRUE wait=TRUE).
+     *
+     * The event is signalled by the KMD at real GPU completion; the
+     * override's fast path signals it inline when the value has already
+     * completed, so a finished frame costs nothing.  The wait is bounded so a
+     * lost completion degrades to a late frame rather than a hung present. */
+    if (q->pQueue && q->pDrainFence && q->hPresentArmEvent) {
+        const UINT64 v = ++q->DrainValue;
+        HRESULT shr = ID3D12CommandQueue_Signal(q->pQueue, q->pDrainFence, v);
+        HRESULT ehr = SUCCEEDED(shr)
+            ? ID3D12Fence_SetEventOnCompletion(q->pDrainFence, v,
+                                               q->hPresentArmEvent)
+            : shr;
+        DWORD wr = WAIT_OBJECT_0;
+        if (SUCCEEDED(ehr))
+            wr = WaitForSingleObject(q->hPresentArmEvent, 1000);
+        if (n <= 8 || (n & 255) == 0)
+            TR_LOG("12.PresentArm #%ld: tid=%lu v=%llu signal=0x%08lx "
+                   "arm=0x%08lx wait=%lu", (long)n, GetCurrentThreadId(),
+                   (unsigned long long)v, (unsigned long)shr,
+                   (unsigned long)ehr, (unsigned long)wr);
+    } else if (n <= 8) {
+        TR_LOG("12.PresentArm #%ld: SKIPPED (queue=%p fence=%p evt=%p)",
+               (long)n, (void *)q->pQueue, (void *)q->pDrainFence,
+               (void *)q->hPresentArmEvent);
+    }
+
     if (n <= 8 || (n & 255) == 0)
         TR_LOG("12.Present #%ld: src=0x%x dst=0x%x ctx=%p surfaces=%u "
                "flipInterval=%d", (long)n,

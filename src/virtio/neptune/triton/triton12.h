@@ -126,6 +126,12 @@ typedef struct TRITON12_QUEUE
      * making every fence the app observes GPU-true.  See tritonQueue12.c. */
     ID3D12Fence                 *pDrainFence;
     UINT64                       DrainValue;
+    /* Auto-reset event the present-fence arm in t12Present waits on, so the
+     * frame is not reported to the compositor until the GPU has finished it.
+     * One per queue rather than one per frame -- each arm mints its own
+     * single-use proxy token, so reusing the handle is safe, and a
+     * per-present CreateEvent would churn a handle on every frame. */
+    HANDLE                       hPresentArmEvent;
 } TRITON12_QUEUE, *PTRITON12_QUEUE;
 
 typedef struct TRITON12_ALLOCATOR
