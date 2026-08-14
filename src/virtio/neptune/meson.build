@@ -23,6 +23,7 @@ npt_common_src = files(
   'npt_overrides_d3d11_texture.c',
   'npt_overrides_d3d11_view.c',
   'npt_overrides_dxgi_adapter.c',
+  'npt_overrides_d3d12_device.c',
   'npt_overrides_dxgi_factory.c',
   'npt_overrides_dxgi_factorymedia.c',
   'npt_overrides_dxgi_output.c',

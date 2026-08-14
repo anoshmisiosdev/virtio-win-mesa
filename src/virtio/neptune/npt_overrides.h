@@ -23,6 +23,7 @@ void npt_overrides_dxgi_output_init(void);
 void npt_overrides_dxgi_factory_init(void);
 void npt_overrides_dxgi_factorymedia_init(void);
 void npt_overrides_dxgi_adapter_init(void);
+void npt_overrides_d3d12_device_init(void);
 
 struct npt_com_base;
 struct npt_output_info;
