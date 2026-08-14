@@ -244,3 +244,73 @@ D3D12CreateVersionedRootSignatureDeserializer(
       dev, &NPT_IID_ID3D12VersionedRootSignatureDeserializer, raw, hr,
       ppRootSignatureDeserializer);
 }
+
+/*
+ * Exports below have no wire protocol behind them, but d3d12.dll must
+ * still provide them: an application that imports d3d12.dll statically
+ * (npt_test.exe imports ten symbols) fails to LOAD if any one is
+ * missing, with "the procedure entry point ... could not be located".
+ * A missing export is therefore not a degraded feature, it is a program
+ * that will not start.
+ */
+
+/*
+ * No debug-layer protocol coverage: vkd3d-proton's validation is armed
+ * host-side via VKD3D_DEBUG/VKD3D_CONFIG in the render server, not
+ * through a guest ID3D12Debug.  Return a real, documented failure and a
+ * NULL out-pointer -- callers defensively probe-and-continue.
+ */
+HRESULT NPT_API
+D3D12GetDebugInterface(REFIID riid, void **ppvDebug)
+{
+   (void)riid;
+   if (ppvDebug)
+      *ppvDebug = NULL;
+   return NPT_E_NOINTERFACE;
+}
+
+/* No backend; mirrors D3D12GetDebugInterface. Real apps probe and continue. */
+HRESULT NPT_API
+D3D12EnableExperimentalFeatures(UINT NumFeatures, const IID *pIIDs,
+                                void *pConfigurationStructs,
+                                UINT *pConfigurationStructSizes)
+{
+   (void)NumFeatures;
+   (void)pIIDs;
+   (void)pConfigurationStructs;
+   (void)pConfigurationStructSizes;
+   return NPT_E_NOINTERFACE;
+}
+
+/*
+ * The D3D12PIX* family is undocumented -- Microsoft has never published a
+ * header for it -- so these signatures come from the declarations
+ * npt_test.c carries.  They exist purely so PIX-instrumented binaries
+ * link and run; doing nothing is the correct behaviour without a
+ * profiler attached.
+ */
+UINT64 NPT_API
+D3D12PIXGetThreadInfo(void)
+{
+   return 0;
+}
+
+UINT64 *NPT_API
+D3D12PIXEventsReplaceBlock(BOOL getEarliestTime)
+{
+   (void)getEarliestTime;
+   return NULL;
+}
+
+void NPT_API
+D3D12PIXNotifyWakeFromFenceSignal(HANDLE hEvent)
+{
+   (void)hEvent;
+}
+
+void NPT_API
+D3D12PIXReportCounter(PCWSTR name, float value)
+{
+   (void)name;
+   (void)value;
+}
