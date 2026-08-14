@@ -89,10 +89,16 @@ npt_id3d10blob_default_Release(void *self)
     return npt_com_default_release(self);
 }
 
-void NPT_STDMETHODCALLTYPE
+/* Dead in practice: npt_overrides_d3d10_blob.c always patches this slot
+ * with the real (cached, sync, byte-marshalling) implementation via
+ * npt_com_register_family + NPT_REGISTER_OVERRIDE at init time. Kept
+ * safe (NULL, no host round trip, no allocation) rather than wrong in
+ * case that init is ever skipped. */
+void * NPT_STDMETHODCALLTYPE
 npt_id3d10blob_default_GetBufferPointer(void *self)
 {
-    npt_async_ID3D10Blob_GetBufferPointer(npt_com_self_ring(self),npt_com_self_id(self));
+    (void)self;
+    return NULL;
 }
 
 SIZE_T NPT_STDMETHODCALLTYPE

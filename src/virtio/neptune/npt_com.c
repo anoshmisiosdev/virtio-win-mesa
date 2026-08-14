@@ -526,6 +526,7 @@ npt_com_init_impl(void)
    npt_overrides_d3d11_fence_init();
    npt_overrides_d3d11_query_init();
    npt_overrides_d3d12_device_init();
+   npt_overrides_d3d10_blob_init();
 }
 
 void

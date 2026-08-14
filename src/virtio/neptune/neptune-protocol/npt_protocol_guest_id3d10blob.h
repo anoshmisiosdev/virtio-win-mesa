@@ -21,6 +21,29 @@
 
 /*
  * ID3D10Blob::GetBufferPointer
+ *
+ * HAND-WRITTEN (not codegen'd): the real ABI returns LPVOID, a raw
+ * pointer into the HOST process's address space that the guest can
+ * never dereference. The generator correctly recognized this method
+ * can't be marshalled by the generic "return a scalar" path and left
+ * only a fire-and-forget stub with no reply payload at all -- exactly
+ * the SetEventOnCompletion-style gap documented as bug class #3.
+ * Nobody had written the override until now, so every caller (root
+ * signature blobs, shader compile output, error blobs) got back
+ * whatever garbage was in the (never-assigned) return register, which
+ * downstream code then handed to real vkd3d-proton calls like
+ * CreateRootSignature as if it were a valid pointer+length -- explaining
+ * the "ring wedged" host hang once vkd3d-proton tried to deserialize
+ * that garbage.
+ *
+ * Fix: thread the byte count through explicitly (the client override
+ * already has it via the working GetBufferSize call) and marshal the
+ * actual bytes in the reply using the same array_count + blob_array
+ * primitives D3D12_SHADER_BYTECODE uses for the guest->host direction
+ * -- just mirrored host->guest here. The decoded bytes land directly in
+ * a guest-owned buffer the caller supplies (cached per-wrapper by the
+ * client override in npt_overrides_d3d10_blob.c), never a raw host
+ * pointer.
  */
 
 struct npt_command_ID3D10Blob_GetBufferPointer {
@@ -30,10 +53,6 @@ struct npt_command_ID3D10Blob_GetBufferPointer {
 static inline size_t
 npt_sizeof_ID3D10Blob_GetBufferPointer(void)
 {
-    /* Command sizing walks caller-supplied input data, so the active
-     * discriminator picks the union arm -- max_mode=0. */
-    const int max_mode = 0;
-    (void)max_mode;  /* unused when the command has no struct/union inputs */
     size_t cmd_size = sizeof(struct npt_command_header);
     return cmd_size;
 }
@@ -54,15 +73,16 @@ npt_encode_ID3D10Blob_GetBufferPointer(struct npt_cs_encoder *enc,
     npt_cs_encoder_write(enc, sizeof(_hdr), &_hdr, sizeof(_hdr));
 }
 
+/* expected_size: caller's upper bound on the blob's byte length (from a
+ * prior GetBufferSize call), used only to size the reply shmem window
+ * -- the host writes however many bytes its own GetBufferSize()
+ * reports, which should match but isn't assumed to. */
 static inline size_t
-npt_sizeof_ID3D10Blob_GetBufferPointer_reply(void)
+npt_sizeof_ID3D10Blob_GetBufferPointer_reply(size_t expected_size)
 {
-    /* Reply sizing reserves an upper bound before the host has filled
-     * the data, so union arms size as max-of-arms regardless of the
-     * caller's discriminator -- max_mode=1. */
-    const int max_mode = 1;
-    (void)max_mode;  /* unused when the reply has no struct/union outputs */
     size_t cmd_size = sizeof(struct npt_reply_header);
+    cmd_size += npt_sizeof_array_count(expected_size);
+    cmd_size += npt_sizeof_blob_array(NULL, expected_size);
     return cmd_size;
 }
 
@@ -70,6 +90,7 @@ static inline void
 npt_submit_ID3D10Blob_GetBufferPointer(struct npt_ring *ring,
                                        uint32_t cmd_flags,
                                        npt_object_id object_id,
+                                       size_t expected_size,
                                        struct npt_ring_submit_command *submit)
 {
     uint8_t local_cmd_data[NPT_SUBMIT_LOCAL_CMD_SIZE];
@@ -81,7 +102,7 @@ npt_submit_ID3D10Blob_GetBufferPointer(struct npt_ring *ring,
             cmd_size = 0;
     }
     const size_t reply_size = (cmd_flags & NPT_CMD_FLAG_REPLY)
-        ? npt_sizeof_ID3D10Blob_GetBufferPointer_reply()
+        ? npt_sizeof_ID3D10Blob_GetBufferPointer_reply(expected_size)
         : 0;
 
     struct npt_cs_encoder *enc = npt_ring_submit_command_init(ring, submit, cmd_data, cmd_size, reply_size);
@@ -93,24 +114,51 @@ npt_submit_ID3D10Blob_GetBufferPointer(struct npt_ring *ring,
     }
 }
 
-static inline void
-npt_async_ID3D10Blob_GetBufferPointer(struct npt_ring *ring,
-                                      npt_object_id object_id)
-{
-    struct npt_ring_submit_command submit;
-    npt_submit_ID3D10Blob_GetBufferPointer(ring, 0, object_id, &submit);
-}
-
-static inline void
+/* Fills at most dst_size bytes of dst; *out_actual_size (if non-NULL)
+ * receives the host's real byte count so a mismatched caller-supplied
+ * dst_size can be detected. Returns false on a reply mismatch (fatal
+ * decoder state, stream crossover) -- dst is left untouched. */
+static inline bool
 npt_call_ID3D10Blob_GetBufferPointer(struct npt_ring *ring,
-                                     npt_object_id object_id)
+                                     npt_object_id object_id,
+                                     void *dst, size_t dst_size,
+                                     size_t *out_actual_size)
 {
     struct npt_ring_submit_command submit;
-    npt_submit_ID3D10Blob_GetBufferPointer(ring, NPT_CMD_FLAG_REPLY, object_id, &submit);
+    npt_submit_ID3D10Blob_GetBufferPointer(ring, NPT_CMD_FLAG_REPLY, object_id, dst_size, &submit);
     struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
-    if (dec) {
-        npt_ring_free_command_reply(ring, &submit);
+    if (!dec)
+        return false;
+
+    bool ok = false;
+    struct npt_reply_header _reply;
+    npt_cs_decoder_read(dec, sizeof(_reply), &_reply, sizeof(_reply));
+    if (unlikely(_reply.cmd_type != NPT_CMD_TYPE(255, NPT_IFACE_ID_ID3D10Blob,
+                                                 NPT_METHOD_ID3D10Blob_GetBufferPointer))) {
+        npt_log("ID3D10Blob_GetBufferPointer reply mismatch: got 0x%08x expected 0x%08x",
+                (unsigned)_reply.cmd_type,
+                (unsigned)NPT_CMD_TYPE(255, NPT_IFACE_ID_ID3D10Blob,
+                                       NPT_METHOD_ID3D10Blob_GetBufferPointer));
+    } else {
+        const uint64_t actual_size = npt_decode_array_count_unchecked(dec);
+        if (out_actual_size)
+            *out_actual_size = (size_t)actual_size;
+        if (actual_size) {
+            if (dst && dst_size >= actual_size) {
+                npt_decode_blob_array(dec, dst, actual_size);
+            } else if (dst) {
+                /* Truncate: decode into a scratch temp buffer so the
+                 * stream stays aligned (nothing else follows in this
+                 * reply, but keep the pattern consistent). */
+                void *_scratch = npt_cs_decoder_alloc_temp(dec, actual_size);
+                if (_scratch)
+                    npt_decode_blob_array(dec, _scratch, actual_size);
+            }
+        }
+        ok = true;
     }
+    npt_ring_free_command_reply(ring, &submit);
+    return ok;
 }
 
 /*
