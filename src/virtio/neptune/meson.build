@@ -138,6 +138,23 @@ if npt_is_windows
     gnu_symbol_visibility : 'hidden',
     install : true,
   )
+
+  # d3d12.dll: the D3D12 *API* entry points.  The Windows D3D12 runtime
+  # reaches a driver through the D3D12 DDI, not through these symbols, so
+  # this ships as a DLL an application loads in place of the system one --
+  # the same deployment model vkd3d-proton uses.  The D3D12 protocol layer
+  # and its ctor-table entries are already in npt_common_src.
+  libd3d12_npt = shared_library(
+    'd3d12',
+    [npt_common_src, files('npt_entry_d3d12.c')],
+    include_directories : npt_incs,
+    dependencies : npt_deps,
+    c_args : npt_c_args,
+    vs_module_defs : 'd3d12.def',
+    name_prefix : '',
+    gnu_symbol_visibility : 'hidden',
+    install : true,
+  )
 endif
 # Linux build only produces libnptunix above -- d3d11.dll/dxgi.dll are
 # Wine PE artifacts.

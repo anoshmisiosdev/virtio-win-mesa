@@ -41,26 +41,6 @@ libneptune_umd = shared_library(
   install : true,
 )
 
-# d3d12.dll: the D3D12 *API* entry points.  Kept as its own target rather
-# than exported from neptune_umd.dll because the Windows D3D12 runtime
-# reaches a driver through the DDI, not through these symbols -- an
-# application loads this DLL in place of the system one, the same
-# deployment model vkd3d-proton uses on Windows.  The D3D12 protocol layer
-# and the D3D12 entries in the client ctor table are already built into
-# npt_common_src, so this only adds the public surface.
-libneptune_d3d12 = shared_library(
-  'd3d12',
-  [npt_common_src, files('../npt_entry_d3d12.c', '../npt_entry_dxgi.c')],
-  include_directories : triton_incs,
-  dependencies : npt_deps,
-  c_args : npt_c_args,
-  link_args : ['/FORCE:MULTIPLE', '/IGNORE:4006', 'dxguid.lib'],
-  vs_module_defs : 'd3d12.def',
-  name_prefix : '',
-  gnu_symbol_visibility : 'hidden',
-  install : true,
-)
-
 if with_tests
   # Self-contained: #includes tritonDxbc.c and loads d3dcompiler_47.dll at
   # runtime as the reference compiler.
